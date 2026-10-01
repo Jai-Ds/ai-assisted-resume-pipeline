@@ -1,0 +1,7 @@
+google-search-results
+requests
+openpyxl
+python-docx
+docx2pdf
+pdfplumber
+playwright

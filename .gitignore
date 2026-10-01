@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+# Your personal config and secrets — never commit these
+.env
+config.json
+work_dna.md
+
+# Pipeline state and personal job-search data generated at runtime
+*.xlsx
+~$*.xlsx
+pipeline_state.json
+processed_jobs.json
+staged_jobs/

@@ -1,0 +1,63 @@
+{
+  "profile": {
+    "name": "Jordan Smith",
+    "role_noun": "Enterprise Sales Executive",
+    "location": "Austin, Texas",
+    "email": "jordan.smith@example.com",
+    "phone": "+1-555-0100",
+    "linkedin_url": "https://www.linkedin.com/in/your-handle/",
+    "github_url": "https://github.com/your-handle",
+    "portfolio_url": "",
+    "education": [
+      {
+        "degree": "BBA (Marketing)",
+        "dates": "2017 - 2021",
+        "school": "Example State University"
+      }
+    ],
+    "fixed_roles": [
+      {
+        "title": "Senior Account Executive, Your Current Company",
+        "dates": "Jan 2023 - Present",
+        "max_bullets": 6,
+        "optional": false
+      },
+      {
+        "title": "Account Executive, Previous Company",
+        "dates": "Jun 2020 - Dec 2022",
+        "max_bullets": 3,
+        "optional": false
+      }
+    ]
+  },
+
+  "paths": {
+    "pipeline_dir": ".",
+    "base_versions_dir": "../Base Versions",
+    "job_apps_dir": "../Job Applications",
+    "work_dna_file": "./work_dna.example.md"
+  },
+
+  "base_resume_tags": {
+    "Enterprise-SaaS": "Resume_Enterprise_SaaS",
+    "Hardware-Channel": "Resume_Hardware_Channel"
+  },
+
+  "categories": [
+    {
+      "name": "Enterprise SaaS Sales",
+      "query": "enterprise account executive SaaS OR software bengaluru OR remote"
+    },
+    {
+      "name": "Hardware / Channel Sales",
+      "query": "sales manager hardware OR channel OR distribution bengaluru OR remote"
+    }
+  ],
+
+  "title_blacklist": [
+    "intern", "trainee",
+    "director", "vp ", "v.p.", "vice president",
+    "head of", "cxo", "chief",
+    "contract", "freelance"
+  ]
+}
