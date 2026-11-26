@@ -35,6 +35,7 @@
     "pipeline_dir": ".",
     "base_versions_dir": "../Base Versions",
     "job_apps_dir": "../Job Applications",
+    "drive_bridge_dir": "",
     "work_dna_file": "./work_dna.example.md"
   },
 

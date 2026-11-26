@@ -39,7 +39,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from config import SERPAPI_KEY, PATHS, CATEGORIES, TITLE_BLACKLIST
+from config import SERPAPI_KEY, PATHS, CATEGORIES, TITLE_BLACKLIST, PROFILE
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -94,6 +94,45 @@ def save_category_state(idx):
         json.dump(state, f, indent=2)
 
 
+OVERRIDE_FILE = os.path.join(PIPELINE_DIR, "dashboard_override.json")
+
+
+def check_dashboard_override():
+    """
+    Look for a one-off override dropped locally (by a live Claude Code session that
+    relayed a dashboard button click — this script itself never talks to the dashboard).
+    File shape: {"category_name": "AI Supply Chain"} to jump to a named config.json
+    category, or {"custom_query": "..."} to search exactly that text once. Consumed
+    (deleted) immediately so it never fires twice. Returns a category dict or None.
+    """
+    if not os.path.exists(OVERRIDE_FILE):
+        return None
+    try:
+        with open(OVERRIDE_FILE, encoding="utf-8") as f:
+            override = json.load(f)
+    except Exception as e:
+        print(f"  WARNING: dashboard_override.json unreadable ({e}) — ignoring it.")
+        os.remove(OVERRIDE_FILE)
+        return None
+    os.remove(OVERRIDE_FILE)  # one-shot — consume before acting, never re-fire on crash/retry
+
+    custom_query = (override.get("custom_query") or "").strip()
+    if custom_query:
+        print(f"\n  Dashboard override: custom search queued — \"{custom_query}\"")
+        print("  (one-off — today's run does not count toward or disturb the normal rotation)")
+        return {"name": "Custom (dashboard)", "query": custom_query}
+
+    cat_name = (override.get("category_name") or "").strip()
+    if cat_name:
+        for i, cat in enumerate(CATEGORIES):
+            if cat["name"] == cat_name:
+                print(f"\n  Dashboard override: jumping to \"{cat_name}\"")
+                save_category_state(i)  # counts as today's rotation turn, same as a manual menu pick
+                return cat
+        print(f"  WARNING: dashboard_override.json named category \"{cat_name}\" — not found in config.json's categories, ignoring.")
+    return None
+
+
 def confirm_category(computed_idx, same_day):
     """
     Show the queued category and full list. Let user confirm with Enter
@@ -111,8 +150,15 @@ def confirm_category(computed_idx, same_day):
     print()
 
     while True:
-        raw = input(f"  Press ENTER to run [{computed_idx+1}] {CATEGORIES[computed_idx]['name']}, "
-                    f"or type 1-{len(CATEGORIES)} to override: ").strip()
+        try:
+            raw = input(f"  Press ENTER to run [{computed_idx+1}] {CATEGORIES[computed_idx]['name']}, "
+                        f"or type 1-{len(CATEGORIES)} to override: ").strip()
+        except EOFError:
+            # No one at the keyboard (e.g. Task Scheduler with stdin redirected from NUL) —
+            # behave exactly like pressing ENTER instead of crashing before any scraping happens.
+            print("  (no input available — running unattended, using queued category)")
+            chosen_idx = computed_idx
+            break
         if raw == "":
             chosen_idx = computed_idx
             break
@@ -280,58 +326,84 @@ def _parse_title_company(raw, platform):
 
 
 
-def fetch_google_site(label, site_restrict, query, platform_tag):
+def fetch_google_site(label, site_restrict, query, platform_tag, pages=1):
     """
-    1 SerpApi credit. Google engine with site: restriction.
+    1 SerpApi credit per page. Google engine with site: restriction.
+    pages=2 pulls a second page (results 11-20) via the "start" offset —
+    unlike the google_jobs engine, the classic "google" engine's pagination
+    is via "start", not next_page_token (that rule is specific to google_jobs).
     Returns list of normalized job dicts.
     """
-    params = {
-        "engine":  "google",
-        "q":       f"{query} site:{site_restrict}",
-        # NOTE: tbs=qdr is Google's crawl/index-freshness signal, not the job's
-        # actual posting date — pages Google merely re-crawled recently (e.g.
-        # Naukri's evergreen listicle/category pages) can pass this even when
-        # the individual job inside is months old. Kept tight (2d, was 4d) to
-        # reduce that window; real freshness enforcement happens downstream
-        # (filter_naukri_freshness, the Hirist posted-date check in enrich_jd).
-        "tbs":     "qdr:2d",
-        "gl":      "in",
-        "hl":      "en",
-        "num":     10,
-        "api_key": SERPAPI_KEY,
-    }
-    search  = GoogleSearch(params)
-    results = search.get_dict()
+    # Google silently drops the site: restriction (returning ordinary organic
+    # results for the leftover query text) when too few/no pages actually
+    # match that site. SerpApi passes those through unfiltered, so without
+    # this check, off-domain junk (Wikipedia/Reddit/gov-site hits for stray
+    # query words like "bengaluru") gets treated as real job leads. Require
+    # the result's own domain to actually match site_restrict's domain.
+    site_domain = site_restrict.split("/")[0].lower()
 
-    if "error" in results:
-        print(f"  [{label}] SerpApi error: {results['error']}")
-        return []
+    jobs       = []
+    off_domain = 0
 
-    organic = results.get("organic_results", [])
-    print(f"  [{label}] {len(organic)} result(s)")
+    for page in range(pages):
+        params = {
+            "engine":  "google",
+            "q":       f"{query} site:{site_restrict}",
+            # NOTE: tbs=qdr is Google's crawl/index-freshness signal, not the job's
+            # actual posting date — pages Google merely re-crawled recently (e.g.
+            # Naukri's evergreen listicle/category pages) can pass this even when
+            # the individual job inside is months old. Kept tight (2d, was 4d) to
+            # reduce that window; real freshness enforcement happens downstream
+            # (filter_naukri_freshness, the Hirist posted-date check in enrich_jd).
+            "tbs":     "qdr:2d",
+            "gl":      "in",
+            "hl":      "en",
+            "num":     10,
+            "start":   page * 10,
+            "api_key": SERPAPI_KEY,
+        }
+        search  = GoogleSearch(params)
+        results = search.get_dict()
 
-    jobs = []
-    for r in organic:
-        url      = r.get("link", "")
-        title_raw = r.get("title", "")
-        snippet   = r.get("snippet", "")
+        if "error" in results:
+            print(f"  [{label}] Page {page+1} SerpApi error: {results['error']}")
+            break
 
-        title, company = _parse_title_company(title_raw, platform_tag)
-        job_id = _extract_job_id(url, platform_tag)
+        organic = results.get("organic_results", [])
+        print(f"  [{label}] Page {page+1}: {len(organic)} result(s)")
 
-        jobs.append({
-            "job_id":          job_id or url,
-            "title":           title,
-            "company":         company,
-            "location":        "",
-            "description":     snippet,
-            "apply_url":       url,
-            "source_link":     "",
-            "via":             "",
-            "source_platform": platform_tag,
-            "fetched_at":      datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "has_jd":          False,
-        })
+        for r in organic:
+            url       = r.get("link", "")
+            title_raw = r.get("title", "")
+            snippet   = r.get("snippet", "")
+
+            netloc = urlsplit(url).netloc.lower()
+            if site_domain not in netloc:
+                off_domain += 1
+                continue
+
+            title, company = _parse_title_company(title_raw, platform_tag)
+            job_id = _extract_job_id(url, platform_tag)
+
+            jobs.append({
+                "job_id":          job_id or url,
+                "title":           title,
+                "company":         company,
+                "location":        "",
+                "description":     snippet,
+                "apply_url":       url,
+                "source_link":     "",
+                "via":             "",
+                "source_platform": platform_tag,
+                "fetched_at":      datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "has_jd":          False,
+            })
+
+        if not organic:
+            break  # no more results — don't burn a credit on an empty next page
+
+    if off_domain:
+        print(f"  [{label}] dropped {off_domain} off-domain result(s) — site: restriction didn't hold")
 
     return jobs
 
@@ -555,6 +627,22 @@ def _claude_same_job(a, b):
 
 # ── Stage 5: JD Fetching ─────────────────────────────────────────────────────
 
+def _is_linkedin_search_page(text):
+    """
+    LinkedIn sometimes serves a generic multi-job search-results page instead
+    of the specific listing (e.g. the job was removed or geo-redirected) —
+    a plain requests.get() follows the redirect and gets a 200, so the old
+    code accepted it as a real JD. These markers are LinkedIn's own generic
+    search-UI boilerplate and don't appear on an actual single-job JD page.
+    """
+    markers = [
+        r'Where are the filters\?',
+        r"You're now using AI-powered job search",
+        r'\d[\d,]*\+\s+[\w\s/&-]{3,60}?\s+[Jj]obs? in\b',
+    ]
+    return any(re.search(m, text) for m in markers)
+
+
 def fetch_jd_webfetch(url):
     """Fetch and clean JD text via requests. Used for LinkedIn and Hirist."""
     try:
@@ -650,6 +738,9 @@ def enrich_jd(jobs):
             jd = fetch_jd_webfetch(j.get("apply_url", ""))
             if jd:
                 jd = clean_linkedin_jd(jd)
+                if _is_linkedin_search_page(jd):
+                    print(" [LinkedIn — redirected to generic search results, not a real JD]", end="")
+                    jd = ""
         elif platform == "hirist":
             # Hirist now renders JDs client-side — plain requests only see a
             # "You need to enable JavaScript" shell, so this needs Playwright.
@@ -817,7 +908,7 @@ def update_daily_log(new_jobs):
 
         # Title banner
         ws.merge_cells("A1:K1")
-        ws["A1"]           = "Jayandran — Daily Job Leads"
+        ws["A1"]           = f"{PROFILE['name']} — Daily Job Leads"
         ws["A1"].font      = Font(bold=True, size=14, color=WHITE)
         ws["A1"].fill      = _fill(DARK_BLUE)
         ws["A1"].alignment = _center()
@@ -995,7 +1086,10 @@ def main():
     if os.path.exists(lock):
         print("\n  ERROR: Daily_Jobs_Log.xlsx is open in Excel.")
         print("  Close it first, then re-run scrape.bat.\n")
-        input("  Press ENTER to exit...")
+        try:
+            input("  Press ENTER to exit...")
+        except EOFError:
+            pass
         return
 
     # Recovery: flush any staged jobs not yet written to the sheet
@@ -1006,9 +1100,12 @@ def main():
         mark_staged_logged([fp for fp, _ in unlogged])
         print()
 
-    # Determine today's category — show menu, let user confirm or override
-    computed_idx, same_day = get_today_category()
-    category = confirm_category(computed_idx, same_day)
+    # Determine today's category — a dashboard-relayed override wins outright;
+    # otherwise show the menu and let a human confirm or override interactively.
+    category = check_dashboard_override()
+    if category is None:
+        computed_idx, same_day = get_today_category()
+        category = confirm_category(computed_idx, same_day)
     print(f"\n  Category : {category['name']}")
     print(f"  Query    : {category['query']}\n")
     query = category["query"]
@@ -1017,7 +1114,7 @@ def main():
     print("Stage 1: Fetching from 5 platforms (6 credits)...")
     all_jobs = []
 
-    all_jobs += fetch_google_site("LinkedIn",    "linkedin.com/jobs/view",  query, "linkedin")
+    all_jobs += fetch_google_site("LinkedIn",    "linkedin.com/jobs/view",  query, "linkedin", pages=2)
     all_jobs += fetch_google_site("Hirist",      "hirist.tech/j",           query, "hirist")
     all_jobs += fetch_google_site("Indeed",      "in.indeed.com/viewjob",   query, "indeed")
     all_jobs += fetch_google_site("Naukri",      "naukri.com/job-listings", query, "naukri")
